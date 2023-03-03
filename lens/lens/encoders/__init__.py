@@ -1,5 +1,3 @@
-# flake8: noqa
-# -*- coding: utf-8 -*-
 # Copyright (C) 2020 Unbabel
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,15 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import transformers
+from packaging import version
 
-import logging
-
-from .download_utils import download_model
-from .models import load_from_checkpoint
-
-logging.basicConfig(level=logging.INFO, format="%(message)s")
-logger = logging.getLogger(__name__)
+from .bert import BERTEncoder
+from .roberta import RoBERTaEncoder
 
 
-__version__ = "1.1.0"
-__copyright__ = "2020 Unbabel. All rights reserved."
+str2encoder = {"BERT": BERTEncoder, "RoBERTa": RoBERTaEncoder}

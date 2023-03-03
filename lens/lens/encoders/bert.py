@@ -20,7 +20,7 @@ BERT Encoder
 from typing import Dict
 
 import torch
-from comet.encoders.base import Encoder
+from lens.encoders.base import Encoder
 from transformers import AutoModel, AutoTokenizer
 
 

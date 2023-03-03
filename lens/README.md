@@ -3,10 +3,18 @@ We leveraged the code of [COMET metric](https://github.com/Unbabel/COMET) to imp
 
 ## Installation Instructions
 
+Install from pypi with pip by
+
+```bash
+pip install lens
+```
+
+Install it from the source by:
+
 ```bash
 git clone https://github.com/Yao-Dou/LENS.git
 cd lens
-pip install -e .
+pip install .
 ```
 
 ### Scoring within Python:
@@ -14,7 +22,8 @@ Please download the model checkpoint from [here](https://drive.google.com/drive/
 
 ```python
 
-from lens_score import LENS
+import lens
+from lens.lens_score import LENS
 
 model_path = "<path of downloaded model checkpoint>"
 # Original LENS is a real-valued number. 
@@ -35,7 +44,7 @@ scores = metric.score(complex, simple, references, batch_size=8, gpus=1)
 
 
 ## Publications
-If you use LENS please cite our work! 
+If you use LENS, please cite our work! 
 
 ```angular2html
 @misc{lens2022,

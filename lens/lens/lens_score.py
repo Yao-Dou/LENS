@@ -1,6 +1,6 @@
 import math
 
-from comet import load_from_checkpoint
+from .models import load_from_checkpoint
 
 class LENS:
 
