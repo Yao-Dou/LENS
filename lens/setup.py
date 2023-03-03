@@ -4,9 +4,10 @@ setup(
     name='lens',
     version='0.1.0',
     description='A new metric for text simplification',
-    url='',
     author='Mounica Maddela',
     author_email='mmaddela3@gatech.edu',
+    url='https://github.com/Yao-Dou/LENS',
+    download_url='https://github.com/Yao-Dou/LENS/archive/refs/tags/v0.1.0.tar.gz',
     license='Apache license',
     packages=['lens'],
     install_requires=[
