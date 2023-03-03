@@ -13,20 +13,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 r"""
-XLM-RoBERTa Encoder
+RoBERTa Encoder
 ==============
-    Pretrained XLM-RoBERTa  encoder from Hugging Face.
+    Pretrained RoBERTa  encoder from Hugging Face.
 """
 from typing import Dict
 
 import torch
-from comet.encoders.base import Encoder
-from comet.encoders.bert import BERTEncoder
+from lens.encoders.base import Encoder
+from lens.encoders.bert import BERTEncoder
 from transformers import AutoModel, AutoTokenizer
 
 
-class XLMREncoder(BERTEncoder):
-    """XLM-RoBERTA Encoder encoder.
+class RoBERTaEncoder(BERTEncoder):
+    """RoBERTA Encoder encoder.
 
     :param pretrained_model: Pretrained model from hugging face.
     """
@@ -46,8 +46,7 @@ class XLMREncoder(BERTEncoder):
 
         :return: Encoder model
         """
-        print(pretrained_model)
-        return XLMREncoder(pretrained_model)
+        return RoBERTaEncoder(pretrained_model)
 
     def forward(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs

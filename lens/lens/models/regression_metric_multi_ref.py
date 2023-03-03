@@ -23,9 +23,9 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import torch
-from comet.models.base import CometModel
-from comet.models.metrics import RegressionMetrics
-from comet.modules import FeedForward
+from lens.models.base import CometModel
+from lens.models.metrics import RegressionMetrics
+from lens.modules import FeedForward
 from transformers.optimization import Adafactor
 
 
