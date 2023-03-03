@@ -6,7 +6,7 @@ We leveraged the code of [COMET metric](https://github.com/Unbabel/COMET) to imp
 Install from pypi with pip by
 
 ```bash
-pip install lens
+pip install lens-metric
 ```
 
 Install it from the source by:
