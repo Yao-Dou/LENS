@@ -13,7 +13,7 @@ Install it from the source by:
 
 ```bash
 git clone https://github.com/Yao-Dou/LENS.git
-cd lens
+cd LENS/lens
 pip install .
 ```
 
