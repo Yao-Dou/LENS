@@ -2,12 +2,12 @@ from setuptools import setup, find_packages
 
 setup(
     name='lens_metric',
-    version='0.1.0',
+    version='0.1.1',
     description='A new metric for text simplification',
     author='Mounica Maddela',
     author_email='mmaddela3@gatech.edu',
     url='https://github.com/Yao-Dou/LENS',
-    download_url='https://github.com/Yao-Dou/LENS/archive/refs/tags/v0.1.0.tar.gz',
+    download_url='https://github.com/Yao-Dou/LENS/archive/refs/tags/v0.1.1.tar.gz',
     license='Apache license',
     packages=find_packages(),
     install_requires=[
