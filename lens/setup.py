@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 
 setup(
     name='lens_metric',
@@ -9,7 +9,7 @@ setup(
     url='https://github.com/Yao-Dou/LENS',
     download_url='https://github.com/Yao-Dou/LENS/archive/refs/tags/v0.1.0.tar.gz',
     license='Apache license',
-    packages=['lens'],
+    packages=find_packages(),
     install_requires=[
         "sentencepiece==0.1.96",
         "pandas==1.1.5",
