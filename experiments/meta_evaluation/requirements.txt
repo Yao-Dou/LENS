@@ -1,0 +1,5 @@
+lens-metric==0.1.1
+nltk==3.7
+bert-score==0.3.11
+scipy==1.8.0
+textstat==0.7.3
