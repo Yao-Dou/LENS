@@ -6,6 +6,7 @@ We recommend creating a new conda environment and installing the required packag
 
 ```bash
     conda create -n lens python=3.9
+    conda activate lens
     pip install -r requirments.txt
 ```
 
