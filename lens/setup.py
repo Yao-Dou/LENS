@@ -11,7 +11,7 @@ setup(
     license='Apache license',
     packages=find_packages(),
     install_requires=[
-        "sentencepiece==0.1.96",
+        "sentencepiece>=0.1.96",
         "pandas==1.1.5",
         "transformers>=4.8",
         "pytorch-lightning==1.6.0",
