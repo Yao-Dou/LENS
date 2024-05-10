@@ -14,33 +14,60 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .regression_metric_multi_ref import RegressionMetricMultiReference
-from .base import CometModel
-
 import os
+from pathlib import Path
+from typing import Union
+
 import yaml
+from huggingface_hub import snapshot_download
+
+from .regression_metric_multi_ref import RegressionMetricMultiReference
+from .unified_metric import UnifiedMetric
+from .base import LensModel
+
 
 str2model = {
     "regression_metric_multi_ref": RegressionMetricMultiReference,
+    "unified_metric": UnifiedMetric,
 }
 
 
+def download_model(
+    model: str, 
+    saving_directory: Union[str, Path, None] = None
+) -> str:
+    model_path = snapshot_download(repo_id=model, cache_dir=saving_directory)
+    checkpoint_path = os.path.join(*[model_path, "checkpoints", "model.ckpt"])
+    return checkpoint_path
 
-def load_from_checkpoint(checkpoint_path: str) -> CometModel:
+
+def load_from_checkpoint(checkpoint_path: str) -> LensModel:
     """Loads models from a checkpoint path.
-    :param checkpoint_path: Path to a model checkpoint.
 
-    :return: Returns a COMET model.
+    Args:
+        checkpoint_path (str): Path to a model checkpoint.
+
+    Return:
+        COMET model.
     """
-    if not os.path.exists(checkpoint_path):
-        raise Exception(f"Invalid checkpoint path: {checkpoint_path}")
+    checkpoint_path = Path(checkpoint_path)
 
-    hparams_file = "/".join(checkpoint_path.split("/")[:-2] + ["hparams.yaml"])
-    if os.path.exists(hparams_file):
+    if not checkpoint_path.is_file():
+        raise Exception(f"Invalid checkpoint path: {checkpoint_path}")
+    
+    parent_folder = checkpoint_path.parents[1] # .parent.parent
+    hparams_file = parent_folder / "hparams.yaml"
+    
+    if hparams_file.is_file():
         with open(hparams_file) as yaml_file:
             hparams = yaml.load(yaml_file.read(), Loader=yaml.FullLoader)
         model_class = str2model[hparams["class_identifier"]]
-        model = model_class.load_from_checkpoint(checkpoint_path, **hparams)
+        # model = model_class.load_from_checkpoint(
+        #     checkpoint_path, load_pretrained_weights=False, strict=False
+        # )
+        model = model_class.load_from_checkpoint(
+            checkpoint_path, **hparams, strict=False
+        )
         return model
     else:
-        raise Exception("hparams.yaml file is missing!")
+        raise Exception(f"hparams.yaml file is missing from {parent_folder}!")

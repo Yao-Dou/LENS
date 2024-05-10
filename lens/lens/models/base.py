@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 r"""
-CometModel
+LensModel
 ========================
     Abstract Model class that implements some of the Pytorch Lightning logic.
-    Extend this class to create new model and metrics within COMET.
+    Extend this class to create new model and metrics within LENS.
 """
 import abc
 import logging
@@ -27,35 +27,25 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pytorch_lightning as ptl
 import torch
-import transformers
-from lens.encoders import str2encoder
-from lens.modules import LayerwiseAttention
-from packaging import version
-from torch import nn
-from torch.utils.data import DataLoader, RandomSampler, Sampler, Subset
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Subset
+
+from ..encoders import str2encoder
+from ..modules import LayerwiseAttention
 
 from .lru_cache import tensor_lru_cache
 from .pooling_utils import average_pooling, max_pooling
 from .predict_pbar import PredictProgressBar
+from .predict_writer import CustomWriter
+from .utils import (
+    OrderedSampler,
+    Prediction,
+    Target,
+    flatten_metadata,
+    restore_list_order,
+)
 
-
-class OrderedSampler(Sampler[int]):
-    """
-    Sampler that returns the indices in a deterministic order.
-    """
-
-    def __init__(self, indices: List[int]):
-        self.indices = indices
-
-    def __iter__(self):
-        return iter(self.indices)
-
-    def __len__(self):
-        return len(self.indices)
-
-
-if "COMET_EMBEDDINGS_CACHE" in os.environ:
-    CACHE_SIZE = int(os.environ["COMET_EMBEDDINGS_CACHE"])
+if "LENS_EMBEDDINGS_CACHE" in os.environ:
+    CACHE_SIZE = int(os.environ["LENS_EMBEDDINGS_CACHE"])
 else:
     CACHE_SIZE = 1024
 
@@ -63,70 +53,78 @@ else:
 logger = logging.getLogger(__name__)
 
 
-class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
-    """CometModel:
+class LensModel(ptl.LightningModule, metaclass=abc.ABCMeta):
+    """LensModel: Base class for all LENS models.
 
-    :param nr_frozen_epochs: Number of epochs (% of epoch) that the encoder is frozen.
-    :param keep_embeddings_frozen: Keeps the encoder frozen during training.
-    :param optimizer: Optimizer used during training.
-    :param encoder_learning_rate: Learning rate used to fine-tune the encoder model.
-    :param learning_rate: Learning rate used to fine-tune the top layers.
-    :param layerwise_decay: Learning rate % decay from top-to-bottom encoder layers.
-    :param encoder_model: Encoder model to be used.
-    :param pretrained_model: Pretrained model from Hugging Face.
-    :param pool: Pooling strategy to derive a sentence embedding ['cls', 'max', 'avg'].
-    :param layer: Encoder layer to be used ('mix' for pooling info from all layers.)
-    :param dropout: Dropout used in the top-layers.
-    :param batch_size: Batch size used during training.
-    :param train_data: Path to a csv file containing the training data.
-    :param validation_data: Path to a csv file containing the validation data.
-    :param load_weights_from_checkpoint: Path to a checkpoint file.
-    :param class_identifier: subclass identifier.
+    Args:
+        nr_frozen_epochs (Union[float, int]): Number of epochs (% of epoch) that the
+            encoder is frozen. Defaults to 0.3.
+        keep_embeddings_frozen (bool): Keeps the encoder frozen during training. Defaults
+            to True.
+        optimizer (str): Optimizer used during training. Defaults to 'AdamW'.
+        warmup_steps (int): Warmup steps for LR scheduler.
+        encoder_learning_rate (float): Learning rate used to fine-tune the encoder model.
+            Defaults to 1.0e-06.
+        learning_rate (float): Learning rate used to fine-tune the top layers. Defaults
+            to 1.5e-05.
+        layerwise_decay (float): Learning rate % decay from top-to-bottom encoder layers.
+            Defaults to 0.95.
+        encoder_model (str): Encoder model to be used. Defaults to 'XLM-RoBERTa'.
+        pretrained_model (str): Pretrained model from Hugging Face. Defaults to
+            'xlm-roberta-large'.
+        pool (str): Type of sentence level pooling (options: 'max', 'cls', 'avg').
+            Defaults to 'avg'
+        layer (Union[str, int]): Encoder layer to be used for regression ('mix'
+            for pooling info from all layers). Defaults to 'mix'.
+        layer_transformation (str): Transformation applied when pooling info from all
+            layers (options: 'softmax', 'sparsemax'). Defaults to 'softmax'.
+        layer_norm (bool): Apply layer normalization. Defaults to 'True'.
+        loss (str): Loss function to be used. Defaults to 'mse'.
+        dropout (float): Dropout used in the top-layers. Defaults to 0.1.
+        batch_size (int): Batch size used during training. Defaults to 4.
+        train_data (Optional[List[str]]): List of paths to training data. Each file is
+            loaded consecutively for each epoch. Defaults to None.
+        validation_data (Optional[List[str]]): List of paths to validation data.
+            Validation results are averaged across validation set. Defaults to None.
     """
 
     def __init__(
         self,
         nr_frozen_epochs: Union[float, int] = 0.3,
-        keep_embeddings_frozen: bool = False,
+        keep_embeddings_frozen: bool = True,
         optimizer: str = "AdamW",
-        encoder_learning_rate: float = 1e-05,
-        learning_rate: float = 3e-05,
+        warmup_steps: int = 0,
+        encoder_learning_rate: float = 1.0e-06,
+        learning_rate: float = 1.5e-05,
         layerwise_decay: float = 0.95,
         encoder_model: str = "XLM-RoBERTa",
         pretrained_model: str = "xlm-roberta-large",
         pool: str = "avg",
         layer: Union[str, int] = "mix",
+        layer_transformation: str = "softmax",
+        layer_norm: bool = True,
+        loss: str = "mse",
         dropout: float = 0.1,
         batch_size: int = 4,
-        train_data: Optional[str] = None,
-        validation_data: Optional[str] = None,
-        load_weights_from_checkpoint: Optional[str] = None,
-        class_identifier: Optional[str] = None
+        train_data: Optional[List[str]] = None,
+        validation_data: Optional[List[str]] = None,
+        class_identifier: Optional[str] = None,
+        load_pretrained_weights: bool = True,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters(
-            ignore=["train_data", "validation_data", "load_weights_from_checkpoint"]
-        )
-
-        if self.hparams.encoder_model == "XLM-RoBERTa-XL":
-            # Ensure backwards compatibility with transformer versions
-            if version.parse(transformers.__version__) < version.parse("4.17.0"):
-                raise Exception(
-                    "XLM-RoBERTa-XL requires transformers>=4.17.0. Your current version is {}".format(
-                        transformers.__version__
-                    )
-                )
+        self.save_hyperparameters()
 
         self.encoder = str2encoder[self.hparams.encoder_model].from_pretrained(
-            self.hparams.pretrained_model
+            self.hparams.pretrained_model, load_pretrained_weights
         )
 
         self.epoch_nr = 0
         if self.hparams.layer == "mix":
             self.layerwise_attention = LayerwiseAttention(
+                layer_transformation=layer_transformation,
                 num_layers=self.encoder.num_layers,
                 dropout=self.hparams.dropout,
-                layer_norm=True,
+                layer_norm=self.hparams.layer_norm,
             )
         else:
             self.layerwise_attention = None
@@ -141,78 +139,99 @@ class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
             self.encoder.freeze_embeddings()
 
         self.nr_frozen_epochs = self.hparams.nr_frozen_epochs
-
-        if load_weights_from_checkpoint is not None:
-            if os.path.exists(load_weights_from_checkpoint):
-                self.load_weights(load_weights_from_checkpoint)
-            else:
-                logger.warning(f"Path {load_weights_from_checkpoint} does not exist!")
-
         self.mc_dropout = False  # Flag used to control usage of MC Dropout
         self.caching = False  # Flag used to control Embedding Caching
 
-    def set_mc_dropout(self, value: bool):
+        # If not defined here, metrics will not live in the same device as our model.
+        self.init_metrics()
+
+        # self.train_dataset = self.read_training_data(self.hparams.train_data[0])
+
+    def set_mc_dropout(self, value: int):
+        """Sets Monte Carlo Dropout runs per sample.
+
+        Args:
+            value (int): number of runs per sample.
+        """
         self.mc_dropout = value
 
-    def load_weights(self, checkpoint: str) -> None:
-        """Function that loads the weights from a given checkpoint file.
-        Note:
-            If the checkpoint model architecture is different then `self`, only
-            the common parts will be loaded.
+    @abc.abstractmethod
+    def read_training_data(self) -> List[dict]:
+        """Abstract method that reads the training data.
 
-        :param checkpoint: Path to the checkpoint containing the weights to be loaded.
+        Returns:
+            List[dict]: List with input samples in the form of a dict
         """
-        logger.info(f"Loading weights from {checkpoint}.")
-        checkpoint = torch.load(checkpoint, map_location=lambda storage, loc: storage)
-        pretrained_dict = checkpoint["state_dict"]
-        model_dict = self.state_dict()
-        # 1. filter out unnecessary keys
-        pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-        # 2. overwrite entries in the existing state dict
-        model_dict.update(pretrained_dict)
-        # 3. load the new state dict
-        self.load_state_dict(model_dict)
+        pass
 
     @abc.abstractmethod
-    def read_csv(self):
+    def read_validation_data(self):
+        """Abstract method that reads the validation data. If validation data
+        has a columns 'system' we will output system-level accuracies for each
+        validation dataset.
+
+        Returns:
+            List[dict]: List with input samples in the form of a dict
+        """
         pass
 
     @abc.abstractmethod
     def prepare_sample(
-        self, sample: List[Dict[str, Union[str, float]]], *args, **kwargs
+        self,
+        sample: List[dict],
+        stage: str = "fit",
+        *args,
+        **kwargs,
     ):
+        """This method will be called by dataloaders to prepared data to input to the
+        model.
+
+        Args:
+            sample (List[dict]): Batch of train/val/test samples.
+            stage (str): model stage (options: 'fit', 'validate', 'test', or
+                'predict'). Defaults to 'fit'.
+
+        Returns:
+            Model inputs and (optionally) training labels/targets.
+        """
         pass
 
     @abc.abstractmethod
     def configure_optimizers(self):
+        """Pytorch Lightning method to configure optimizers and schedulers."""
         pass
 
     @abc.abstractmethod
     def init_metrics(self) -> None:
+        """Initializes train/validation metrics."""
         pass
 
     @abc.abstractmethod
-    def forward(self, *args, **kwargs) -> Dict[str, torch.Tensor]:
+    def forward(self, *args, **kwargs) -> Prediction:
+        """Pytorch model forward method."""
         pass
-    
+
     @abc.abstractmethod
-    def is_referenceless(self) -> bool:
+    def requires_references(self) -> bool:
+        """Whether or not this models work with references."""
         pass
 
     def freeze_encoder(self) -> None:
+        """Deactivates training for encoder model parameters (keeping them frozen)"""
         logger.info("Encoder model frozen.")
         self.encoder.freeze()
 
     @property
-    def loss(self) -> None:
-        return nn.MSELoss()
+    def loss(self):
+        """Loss function"""
+        return torch.nn.MSELoss()
 
-    def compute_loss(
-        self, predictions: Dict[str, torch.Tensor], targets: Dict[str, torch.Tensor]
-    ) -> torch.Tensor:
-        return self.loss(predictions["score"].view(-1), targets["score"])
+    def compute_loss(self, prediction: Prediction, target: Target) -> torch.Tensor:
+        """Computes Loss value between a batch Prediction and respective Target."""
+        return self.loss(prediction.scores, target.scores)
 
     def unfreeze_encoder(self) -> None:
+        """Activates fine-tuning of encoder parameters."""
         if self._frozen:
             if self.trainer.is_global_zero:
                 logger.info("Encoder model fine-tuning")
@@ -234,52 +253,75 @@ class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
         self.caching = True
 
     def get_sentence_embedding(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Function that extracts sentence embeddings for
-            a single sentence.
+        a single sentence and allows for caching embeddings.
 
-        :param tokens: sequences [batch_size x seq_len]
-        :param lengths: lengths [batch_size]
+        Args:
+            tokens (torch.Tensor): sequences [batch_size x seq_len].
+            attention_mask (torch.Tensor): attention_mask [batch_size x seq_len].
+            token_type_ids (torch.Tensor): Model token_type_ids [batch_size x seq_len].
+                Optional
 
-        :return: torch.Tensor [batch_size x hidden_size]
+        Returns:
+            torch.Tensor [batch_size x hidden_size] with sentence embeddings.
         """
         if self.caching:
-            return self.retrieve_sentence_embedding(input_ids, attention_mask)
+            return self.retrieve_sentence_embedding(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                token_type_ids=token_type_ids,
+            )
         else:
-            return self.compute_sentence_embedding(input_ids, attention_mask)
+            return self.compute_sentence_embedding(
+                input_ids,
+                attention_mask,
+                token_type_ids=token_type_ids,
+            )
 
     @tensor_lru_cache(maxsize=CACHE_SIZE)
     def retrieve_sentence_embedding(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Wrapper for `get_sentence_embedding` function that caches results."""
-        return self.compute_sentence_embedding(input_ids, attention_mask)
+        return self.compute_sentence_embedding(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+        )
 
     def compute_sentence_embedding(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        token_type_ids: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        """Function that extracts sentence embeddings for
+        a single sentence.
 
-        encoder_out = self.encoder(input_ids, attention_mask)
+        Args:
+            tokens (torch.Tensor): sequences [batch_size x seq_len].
+            attention_mask (torch.Tensor): attention_mask [batch_size x seq_len].
+            token_type_ids (torch.Tensor): Model token_type_ids [batch_size x seq_len].
+                Optional
+
+        Returns:
+            torch.Tensor [batch_size x hidden_size] with sentence embeddings.
+        """
+        encoder_out = self.encoder(
+            input_ids, attention_mask, token_type_ids=token_type_ids
+        )
         if self.layerwise_attention:
-            # HACK: LayerNorm is applied at the MiniBatch. This means that for big batch sizes the variance
-            # and norm within the batch will create small differences in the final score
-            # If we are predicting we split the data into equal size batches to minimize this variance.
-            if not self.training:
-                n_splits = len(torch.split(encoder_out["all_layers"][-1], 8))
-                embeddings = []
-                for split in range(n_splits):
-                    all_layers = []
-                    for layer in range(len(encoder_out["all_layers"])):
-                        layer_embs = torch.split(encoder_out["all_layers"][layer], 8)
-                        all_layers.append(layer_embs[split])
-                    split_attn = torch.split(attention_mask, 8)[split]
-                    embeddings.append(self.layerwise_attention(all_layers, split_attn))
-                embeddings = torch.cat(embeddings, dim=0)
-            else:
-                embeddings = self.layerwise_attention(
-                    encoder_out["all_layers"], attention_mask
-                )
+            embeddings = self.layerwise_attention(
+                encoder_out["all_layers"], attention_mask
+            )
 
         elif self.hparams.layer >= 0 and self.hparams.layer < self.encoder.num_layers:
             embeddings = encoder_out["all_layers"][self.hparams.layer]
@@ -313,16 +355,17 @@ class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
 
     def training_step(
         self,
-        batch: Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]],
-        batch_nb: int,
+        batch: Tuple[dict, Target],
+        batch_idx: int,
     ) -> torch.Tensor:
-        """
-        Runs one training step and logs the training loss.
+        """Pytorch Lightning training step.
 
-        :param batch: The output of your prepare_sample function.
-        :param batch_nb: Integer displaying which batch this is.
+        Args:
+            batch (Tuple[dict, Target]): The output of your `prepare_sample` method.
+            batch_idx (int): Integer displaying which batch this is.
 
-        :returns: Loss value
+        Returns:
+            [torch.Tensor] Loss value
         """
         batch_input, batch_target = batch
         batch_prediction = self.forward(**batch_input)
@@ -331,7 +374,7 @@ class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
         if (
             self.nr_frozen_epochs < 1.0
             and self.nr_frozen_epochs > 0.0
-            and batch_nb > self.epoch_total_steps * self.nr_frozen_epochs
+            and batch_idx > self.first_epoch_total_steps * self.nr_frozen_epochs
         ):
             self.unfreeze_encoder()
             self._frozen = False
@@ -345,31 +388,26 @@ class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
         batch_nb: int,
         dataloader_idx: int,
     ) -> None:
-        """
-        Runs one validation step and logs metrics.
+        """Pytorch Lightning validation step. Runs model and logs metircs.
 
-        :param batch: The output of your prepare_sample function.
-        :param batch_nb: Integer displaying which batch this is.
-        :param dataloader_idx: Integer displaying which dataloader this is.
+        Args:
+            batch (Tuple[dict, Target]): The output of your `prepare_sample` method.
+            batch_idx (int): Integer displaying which batch this is.
         """
         batch_input, batch_target = batch
         batch_prediction = self.forward(**batch_input)
-        loss_value = self.compute_loss(batch_prediction, batch_target)
-        self.log("val_loss", loss_value, on_step=True, on_epoch=True)
+        if dataloader_idx == 0:
+            self.train_metrics.update(batch_prediction.scores, batch_target["scores"])
 
-        # TODO: REMOVE if condition after torchmetrics bug fix
-        if batch_prediction["score"].view(-1).size() != torch.Size([1]):
-            if dataloader_idx == 0:
-                self.train_metrics.update(
-                    batch_prediction["score"].view(-1), batch_target["score"]
-                )
-            elif dataloader_idx == 1:
-                self.val_metrics.update(
-                    batch_prediction["score"].view(-1), batch_target["score"]
-                )
+        elif dataloader_idx > 0:
+            self.val_metrics[dataloader_idx - 1].update(
+                batch_prediction.scores,
+                batch_target["scores"],
+                batch_target["system"] if "system" in batch_target else None,
+            )
 
     def on_predict_start(self) -> None:
-        """Called when predict begins."""
+        """Called when predict begins to setup mc_dropout."""
         if self.mc_dropout:
             self.train()
         else:
@@ -381,130 +419,195 @@ class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
         batch_idx: Optional[int] = None,
         dataloader_idx: Optional[int] = None,
     ) -> torch.Tensor:
-        """
-        Runs one prediction step and returns the predicted values.
+        """Pytorch Lightning predict step.
 
-        :param batch: The output of your prepare_sample function.
-        :param batch_nb: Integer displaying which batch this is.
-        :param dataloader_idx: Integer displaying which dataloader this is.
+        Args:
+            batch (Tuple[dict, Target]): The output of your `prepare_sample` method.
+            batch_idx (int): Integer displaying which batch this is.
+            dataloader_idx (int): Integer displaying which dataloader this sample is
+                coming from.
+
+        Return:
+            Predicion object
         """
+        # Legacy implementation
+        model_outputs = Prediction(scores=self(**batch)["scores"].view(-1))
+
+        # Implementation with Prediction object
+        # model_outputs = Prediction(scores=self(**batch).scores)
         if self.mc_dropout:
             mcd_outputs = torch.stack(
-                [self(**batch)["score"].view(-1) for _ in range(self.mc_dropout)]
+                [self(**batch).scores for _ in range(self.mc_dropout)]
             )
-            mcd_mean = mcd_outputs.mean(dim=0)
-            mcd_std = mcd_outputs.std(dim=0)
-            return mcd_mean, mcd_std
-
-        return self(**batch)["score"].view(-1)
+            model_outputs["metadata"] = Prediction(
+                mcd_scores=mcd_outputs.mean(dim=0),
+                mcd_std=mcd_outputs.std(dim=0),
+            )
+        return model_outputs
 
     def validation_epoch_end(self, *args, **kwargs) -> None:
         """Computes and logs metrics."""
-        self.log_dict(self.train_metrics.compute(), prog_bar=True)
-        self.log_dict(self.val_metrics.compute(), prog_bar=True)
+        self.log_dict(self.train_metrics.compute(), prog_bar=False)
         self.train_metrics.reset()
-        self.val_metrics.reset()
-        
 
-    def setup(self, stage) -> None:
+        val_metrics = []
+        for i in range(len(self.hparams.validation_data)):
+            results = self.val_metrics[i].compute()
+            self.val_metrics[i].reset()
+            # Log to tensorboard the results for this validation set.
+            self.log_dict(results, prog_bar=False)
+            val_metrics.append(results)
+
+        average_results = {"val_" + k.split("_")[-1]: [] for k in val_metrics[0].keys()}
+        for i in range(len(val_metrics)):
+            for k, v in val_metrics[i].items():
+                average_results["val_" + k.split("_")[-1]].append(v)
+
+        self.log_dict(
+            {k: sum(v) / len(v) for k, v in average_results.items()}, prog_bar=True
+        )
+
+    def setup(self, stage: str) -> None:
         """Data preparation function called before training by Lightning.
 
-        :param stage: either 'fit', 'validate', 'test', or 'predict'
+        stage (str): either 'fit', 'validate', 'test', or 'predict'
         """
         if stage in (None, "fit"):
-            self.train_dataset = self.read_csv(self.hparams.train_data)
-            self.validation_dataset = self.read_csv(self.hparams.validation_data)
+            train_dataset = self.read_training_data(self.hparams.train_data[0])
 
-            self.epoch_total_steps = len(self.train_dataset) // (
+            self.validation_sets = [
+                self.read_validation_data(d) for d in self.hparams.validation_data
+            ]
+
+            self.first_epoch_total_steps = len(train_dataset) // (
                 self.hparams.batch_size * max(1, self.trainer.num_devices)
             )
+
+            # Legacy implementation uses these:
+            self.epoch_total_steps = self.first_epoch_total_steps
             self.total_steps = self.epoch_total_steps * float(self.trainer.max_epochs)
 
-            # Always validate the model with 2k examples to control overfit.
-            train_subset = np.random.choice(a=len(self.train_dataset), size=2000)
-            self.train_subset = Subset(self.train_dataset, train_subset)
-            self.init_metrics()
+            # Always validate the model with part of training.
+            train_subset = np.random.choice(
+                a=len(train_dataset), size=min(1000, int(len(train_dataset) * 0.2))
+            )
+            self.train_subset = Subset(train_dataset, train_subset)
 
     def train_dataloader(self) -> DataLoader:
-        """Function that loads the train set."""
+        """Method that loads the train dataloader. Can be called every epoch to load a
+        different trainset if `reload_dataloaders_every_n_epochs=1` in Lightning
+        Trainer.
+        """
+        # I removed the lambda function as this was causing pickle problems
+
+        # Causes more pickle problems, so I loaded the data in __init__ instead.
+        # This is meant for interweaving multiple datasets, which is helpful, but we
+        # don't need this.
+        # data_path = self.hparams.train_data[
+        #     self.current_epoch % len(self.hparams.train_data)
+        # ]
+        # train_dataset = self.read_training_data(data_path)
+        # logger.info(f"Loading {data_path}.")
+
+        train_dataset = self.train_dataset
+
         return DataLoader(
-            dataset=self.train_dataset,
-            sampler=RandomSampler(self.train_dataset),
+            dataset=train_dataset,
+            sampler=RandomSampler(train_dataset),
             batch_size=self.hparams.batch_size,
-            collate_fn=self.prepare_sample,
+            collate_fn=self.prepare_sample, # lambda s: self.prepare_sample(s, stage="fit")
             num_workers=2 * self.trainer.num_devices,
         )
 
     def val_dataloader(self) -> DataLoader:
-        """Function that loads the validation set."""
-        return [
+        """Function that loads the validation sets."""
+        # I removed the lambda function as this was causing pickle problems
+        val_data = [
             DataLoader(
                 dataset=self.train_subset,
                 batch_size=self.hparams.batch_size,
-                collate_fn=self.prepare_sample,
+                collate_fn=self.prepare_sample, # lambda s: self.prepare_sample(s, stage="validate")
                 num_workers=2 * self.trainer.num_devices,
-            ),
-            DataLoader(
-                dataset=self.validation_dataset,
-                batch_size=self.hparams.batch_size,
-                collate_fn=self.prepare_sample,
-                num_workers=2 * self.trainer.num_devices,
-            ),
+            )
         ]
+        for validation_set in self.validation_sets:
+            val_data.append(
+                DataLoader(
+                    dataset=validation_set,
+                    batch_size=self.hparams.batch_size,
+                    collate_fn=self.prepare_sample, # lambda s: self.prepare_sample(s, stage="validate")
+                    num_workers=2 * self.trainer.num_devices,
+                )
+            )
+        return val_data
 
     def prepare_for_inference(self, sample):
-        """Ideally this should be a lamba function but for some reason python does not copy local lambda functions.
-        This functions replaces `collate_fn=lambda x: self.prepare_sample(x, inference=True)` from line 434.
+        """This is to avoid having a lamba function inside the predict dataloader
+        `collate_fn=lambda x: self.prepare_sample(x, inference=True)`
         """
-        return self.prepare_sample(sample, inference=True)
+        return self.prepare_sample(sample, stage="predict")
 
     def predict(
         self,
         samples: List[Dict[str, str]],
-        batch_size: int = 8,
-        gpus: int = 1,
-        mc_dropout: Union[int, bool] = False,
+        batch_size: int = 16,
+        devices: Union[List[int], str, int] = None,
+        mc_dropout: int = 0,
         progress_bar: bool = True,
-        accelerator: str = "ddp",
+        accelerator: str = "auto",
         num_workers: int = None,
         length_batching: bool = True,
-    ) -> Union[Tuple[List[float], float], Tuple[List[float], List[float], float]]:
-        """Function that receives a list of samples (dictionaries with translations, sources and/or references)
-        and returns segment level scores and a system level score. If `mc_dropout` is set, it also returns for each
-        segment score, a confidence value.
+    ) -> Prediction:
+        """Method that receives a list of samples (dictionaries with translations,
+        sources and/or references) and returns segment-level scores, system level score
+        and any other metadata outputed by LENS models. If `mc_dropout` is set, it
+        also returns for each segment score, a confidence value.
 
-        :param samples: List with dictionaries with source, translations and/or references.
-        :param batch_size: Batch size used during inference.
-        :param gpus: Number of GPUs to be used.
-        :param mc_dropout: Number of inference steps to run using MCD. Its disabled by default!
-        :param progress_bar: Flag that turns on and off the predict progress bar.
-        :param accelarator: Pytorch Lightning accelerator (e.g: dp, ddp).
-        :param num_workers: Number of workers to use when loading data from dataloaders.
-        :param length_batching: If set to true, reduces padding by sorting samples by MT length.
+        Args:
+            samples (List[Dict[str, str]]): List with dictionaries with source,
+                translations and/or references.
+            batch_size (int): Batch size used during inference. Defaults to 16
+            devices (Optional[List[int]]): A sequence of device indices to be used.
+                Default: None.
+            mc_dropout (int): Number of inference steps to run using MCD. Defaults to 0
+            progress_bar (bool): Flag that turns on and off the predict progress bar.
+                Defaults to True
+            accelarator (str): Pytorch Lightning accelerator (e.g: 'cpu', 'cuda', 'hpu'
+                , 'ipu', 'mps', 'tpu'). Defaults to 'auto'
+            num_workers (int): Number of workers to use when loading and preparing
+                data. Defaults to None
+            length_batching (bool): If set to true, reduces padding by sorting samples
+                by sequence length. Defaults to True.
 
-        :return: List with segment-level scores and a system-score or segment-level scores, segment-level
-            confidence and a system-score.
+        Return:
+            Prediction object with `scores`, `system_score` and any metadata returned
+                by the model.
         """
-        # HACK: Workaround pytorch bug that prevents ParameterList to be used in DP
-        # https://github.com/pytorch/pytorch/issues/36035
-        if self.layerwise_attention is not None and gpus > 1:
-            self.layerwise_attention.gamma_value = float(
-                self.layerwise_attention.gamma[0]
-            )
-            self.layerwise_attention.weights = [
-                float(parameter[0])
-                for parameter in self.layerwise_attention.scalar_parameters
-            ]
+        # Don't use all GPUs if there are less samples than GPUs
+        if len(samples) < len(devices): 
+            devices = range(len(samples))
+        gpus = len(devices)
+        
+        if mc_dropout > 0:
+            self.set_mc_dropout(mc_dropout)
 
-        # TODO: ideally this should be based on the actual token_ids
-        # but that would require fundamentally changing the way dataloader is
-        # setup, so currently raw chars are used as an approximation
-        sampler = None
+        if devices is not None:
+            assert len(devices) == gpus, AssertionError(
+                "List of devices must be same size as `gpus`"
+            )
+        else:
+            devices = gpus if gpus > 0 else None
+
+        sampler = SequentialSampler(samples)
         if length_batching and gpus < 2:
-            sort_ids = np.argsort([len(sample["src"]) for sample in samples])
+            try:
+                sort_ids = np.argsort([len(sample["src"]) for sample in samples])
+            except KeyError:
+                sort_ids = np.argsort([i for i, sample in enumerate(samples)])
             sampler = OrderedSampler(sort_ids)
 
         if num_workers is None:
+            # Guideline for workers that typically works well.
             num_workers = 2 * gpus
 
         self.eval()
@@ -515,72 +618,62 @@ class CometModel(ptl.LightningModule, metaclass=abc.ABCMeta):
             collate_fn=self.prepare_for_inference,
             num_workers=num_workers,
         )
-        accelerator = accelerator if gpus > 1 else None
+        if gpus > 1:
+            pred_writer = CustomWriter()
+            callbacks = [pred_writer]
+        else:
+            callbacks = []
+
+        if progress_bar:
+            enable_progress_bar = True
+            callbacks.append(PredictProgressBar())
+        else:
+            enable_progress_bar = False
 
         warnings.filterwarnings(
             "ignore",
             category=UserWarning,
             message=".*Consider increasing the value of the `num_workers` argument` .*",
         )
-        if progress_bar:
-            trainer = ptl.Trainer(
-                gpus=gpus,
-                deterministic=True,
-                logger=False,
-                callbacks=[PredictProgressBar()],
-                accelerator=accelerator,
-                max_epochs=-1
-            )
-        else:
-            trainer = ptl.Trainer(
-                gpus=gpus,
-                deterministic=True,
-                logger=False,
-                progress_bar_refresh_rate=0,
-                accelerator=accelerator,
-                max_epochs=-1
-            )
-
-        # TODO:
-        # Remove this upon resolution of:
-        # https://github.com/PyTorchLightning/pytorch-lightning/discussions/11392
-        warnings.filterwarnings(
-            "ignore",
-            category=UserWarning,
-            message="Your `predict_dataloader`'s sampler has shuffling enabled.*",
+        trainer = ptl.Trainer(
+            devices=devices,
+            logger=False,
+            callbacks=callbacks,
+            accelerator=accelerator if gpus > 0 else "cpu",
+            strategy="ddp",
+            enable_progress_bar=enable_progress_bar,
         )
+        return_predictions = False if gpus > 1 else True
+        predictions = trainer.predict(
+            self, dataloaders=dataloader, return_predictions=return_predictions
+        )
+        if gpus > 1:
+            torch.distributed.barrier()  # Waits for all processes to finish predict
 
-        if mc_dropout:
-            self.set_mc_dropout(mc_dropout)
-            predictions = trainer.predict(
-                self, dataloaders=dataloader, return_predictions=True
-            )
-            mean_scores = [out[0] for out in predictions]
-            std_scores = [out[1] for out in predictions]
-            mean_scores = torch.cat(mean_scores, dim=0).tolist()
-            std_scores = torch.cat(std_scores, dim=0).tolist()
-            if length_batching and gpus < 2:
-                unsorted_mean_scores = [None for _ in range(len(samples))]
-                unsorted_std_scores = [None for _ in range(len(samples))]
-                for idx, mean_score, std_score in zip(
-                    sort_ids, mean_scores, std_scores
-                ):
-                    unsorted_mean_scores[idx] = mean_score
-                    unsorted_std_scores[idx] = std_score
-                mean_scores = unsorted_mean_scores
-                std_scores = unsorted_std_scores
+        # If we are in the GLOBAL RANK we need to gather all predictions
+        if gpus > 1 and trainer.is_global_zero:
+            predictions = pred_writer.gather_all_predictions()
+            # Delete Temp folder.
+            pred_writer.cleanup()
+            return predictions
 
-            return mean_scores, std_scores, sum(mean_scores) / len(mean_scores)
+        elif gpus > 1 and not trainer.is_global_zero:
+            # If we are not in the GLOBAL RANK we will return None
+            exit()
 
+        scores = torch.cat([pred.scores for pred in predictions], dim=0).tolist()
+        if "metadata" in predictions[0]:
+            metadata = flatten_metadata([pred.metadata for pred in predictions])
         else:
-            predictions = trainer.predict(
-                self, dataloaders=dataloader, return_predictions=True
-            )
-            predictions = torch.cat(predictions, dim=0).tolist()
-            if length_batching and gpus < 2:
-                unsorted_predictions = [None for _ in range(len(samples))]
-                for idx, prediction in zip(sort_ids, predictions):
-                    unsorted_predictions[idx] = prediction
-                predictions = unsorted_predictions
+            metadata = []
 
-            return predictions, sum(predictions) / len(predictions)
+        if length_batching and gpus < 2:
+            scores = restore_list_order(scores, sort_ids)
+            output = Prediction(scores=scores, system_score=sum(scores) / len(scores))
+            if metadata:
+                output["metadata"] = Prediction(
+                    **{k: restore_list_order(v, sort_ids) for k, v in metadata.items()}
+                )
+            return output
+        else:
+            return Prediction(scores=scores, system_score=sum(scores) / len(scores))

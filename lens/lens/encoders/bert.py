@@ -17,48 +17,89 @@ BERT Encoder
 ==============
     Pretrained BERT encoder from Hugging Face.
 """
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
-from lens.encoders.base import Encoder
-from transformers import AutoModel, AutoTokenizer
+from transformers import BertConfig, BertModel, BertTokenizerFast
+
+from .base import Encoder
 
 
 class BERTEncoder(Encoder):
     """BERT encoder.
 
-    :param pretrained_model: Pretrained model from hugging face.
+    Args:
+        pretrained_model (str): Pretrained model from hugging face.
+        load_pretrained_weights (bool): If set to True loads the pretrained weights
+            from Hugging Face
     """
 
-    def __init__(self, pretrained_model: str) -> None:
+    def __init__(
+        self, pretrained_model: str, load_pretrained_weights: bool = True
+    ) -> None:
         super().__init__()
-        self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model, use_fast=True)
-        self.model = AutoModel.from_pretrained(pretrained_model)
+        self.tokenizer = BertTokenizerFast.from_pretrained(
+            pretrained_model, use_fast=True
+        )
+        if load_pretrained_weights:
+            self.model = BertModel.from_pretrained(
+                pretrained_model, add_pooling_layer=False
+            )
+        else:
+            self.model = BertModel(
+                BertConfig.from_pretrained(pretrained_model), add_pooling_layer=False
+            )
         self.model.encoder.output_hidden_states = True
 
     @property
-    def output_units(self):
+    def output_units(self) -> int:
         """Max number of tokens the encoder handles."""
         return self.model.config.hidden_size
 
     @property
-    def max_positions(self):
+    def max_positions(self) -> int:
         """Max number of tokens the encoder handles."""
-        return self.model.config.max_position_embeddings
+        return self.model.config.max_position_embeddings - 2
 
     @property
-    def num_layers(self):
+    def num_layers(self) -> int:
         """Number of model layers available."""
         return self.model.config.num_hidden_layers + 1
 
-    @classmethod
-    def from_pretrained(cls, pretrained_model: str) -> Encoder:
-        """Function that loads a pretrained encoder from Hugging Face.
-        :param pretrained_model: Name of the pretrain model to be loaded.
+    @property
+    def size_separator(self) -> int:
+        """Size of the seperator.
+        E.g: For BERT is just 1 ([SEP]) but models such as XLM-R use 2 (</s></s>).
 
-        :return: Encoder model
+        Returns:
+            int: Number of tokens used between two segments.
         """
-        return BERTEncoder(pretrained_model)
+        return 1
+
+    @property
+    def uses_token_type_ids(self) -> bool:
+        """Whether or not the model uses token type ids to differentiate sentences.
+
+        Returns:
+            bool: True for models that use token_type_ids such as BERT.
+        """
+        return True
+
+    @classmethod
+    def from_pretrained(
+        cls, pretrained_model: str, load_pretrained_weights: bool = True
+    ) -> Encoder:
+        """Function that loads a pretrained encoder from Hugging Face.
+
+        Args:
+            pretrained_model (str):Name of the pretrain model to be loaded.
+            load_pretrained_weights (bool): If set to True loads the pretrained weights
+                from Hugging Face
+
+        Returns:
+            Encoder: XLMREncoder object.
+        """
+        return BERTEncoder(pretrained_model, load_pretrained_weights)
 
     def freeze_embeddings(self) -> None:
         """Frezees the embedding layer."""
@@ -66,11 +107,14 @@ class BERTEncoder(Encoder):
             param.requires_grad = False
 
     def layerwise_lr(self, lr: float, decay: float):
-        """
-        :param lr: Learning rate for the highest encoder layer.
-        :param decay: decay percentage for the lower layers.
+        """Calculates the learning rate for each layer by applying a small decay.
 
-        :return: List of model parameters with layer-wise decay learning rate
+        Args:
+            lr (float): Learning rate for the highest encoder layer.
+            decay (float): decay percentage for the lower layers.
+
+        Returns:
+            list: List of model parameters for all layers and the corresponding lr.
         """
         # Embedding Layer
         opt_parameters = [
@@ -90,10 +134,27 @@ class BERTEncoder(Encoder):
         return opt_parameters
 
     def forward(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        token_type_ids: Optional[torch.tensor] = None,
+        **kwargs
     ) -> Dict[str, torch.Tensor]:
+        """BERT model forward
+
+        Args:
+            input_ids (torch.Tensor): tokenized batch.
+            attention_mask (torch.Tensor): batch attention mask.
+            token_type_ids (Optional[torch.tensor]): batch attention mask. Defaults to
+                None
+
+        Returns:
+            Dict[str, torch.Tensor]: dictionary with 'sentemb', 'wordemb', 'all_layers'
+                and 'attention_mask'.
+        """
         last_hidden_states, pooler_output, all_layers = self.model(
             input_ids=input_ids,
+            token_type_ids=token_type_ids,
             attention_mask=attention_mask,
             output_hidden_states=True,
             return_dict=False,
