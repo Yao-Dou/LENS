@@ -15,7 +15,7 @@
 
 r"""
 RegressionMetric
-========================
+================
     Regression Metric that learns to predict a quality assessment by looking
     at source, translation and reference.
 """
@@ -23,13 +23,16 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import pandas as pd
 import torch
-from lens.models.base import CometModel
-from lens.models.metrics import RegressionMetrics
-from lens.modules import FeedForward
+
 from transformers.optimization import Adafactor
 
+from .base import LensModel
+from .metrics import RegressionMetrics
+from .utils import Prediction, Target
+from ..modules import FeedForward
 
-class RegressionMetricMultiReference(CometModel):
+
+class RegressionMetricMultiReference(LensModel):
     """RegressionMetricMultiReference:
 
     :param nr_frozen_epochs: Number of epochs (% of epoch) that the encoder is frozen.
@@ -94,7 +97,7 @@ class RegressionMetricMultiReference(CometModel):
         self.save_hyperparameters()
 
         self.topk = topk
-        print(self.topk)
+        print(f'Using LENS with topk={self.topk}')
 
         self.estimator = FeedForward(
             in_dim=self.encoder.output_units * 7,
@@ -105,16 +108,17 @@ class RegressionMetricMultiReference(CometModel):
         )
 
     def init_metrics(self):
+        """Initializes train/validation metrics."""
         self.train_metrics = RegressionMetrics(prefix="train")
         self.val_metrics = RegressionMetrics(prefix="val")
     
-    def is_referenceless(self) -> bool:
-        return False
+    def requires_references(self) -> bool:
+        return True
 
     def configure_optimizers(
         self,
     ) -> Tuple[List[torch.optim.Optimizer], List[torch.optim.lr_scheduler.LambdaLR]]:
-        """Sets the optimizers to be used during training."""
+        """Pytorch Lightning method to configure optimizers and schedulers."""
         layer_parameters = self.encoder.layerwise_lr(
             self.hparams.encoder_learning_rate, self.hparams.layerwise_decay
         )
@@ -141,11 +145,10 @@ class RegressionMetricMultiReference(CometModel):
             )
         else:
             optimizer = torch.optim.AdamW(params, lr=self.hparams.learning_rate)
-        # scheduler = self._build_scheduler(optimizer)
         return [optimizer], []
 
     def prepare_sample(
-        self, sample: List[Dict[str, Union[str, float]]], inference: bool = False
+        self, sample: List[Dict[str, Union[str, float]]], stage: str = "train"
     ) -> Union[
         Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]], Dict[str, torch.Tensor]
     ]:
@@ -158,6 +161,7 @@ class RegressionMetricMultiReference(CometModel):
         :returns: Tuple with 2 dictionaries (model inputs and targets).
             If `inference=True` returns only the model inputs.
         """
+        inference = (stage == "predict")
 
         sample = {k: [dic[k] for dic in sample] for k in sample[0]}
         if inference:
@@ -189,7 +193,7 @@ class RegressionMetricMultiReference(CometModel):
             inputs = {**src_inputs, **mt_inputs, **ref_inputs}
             all_inputs.append(inputs)
 
-        targets = {"score": torch.tensor(sample["score"], dtype=torch.float)}
+        targets = {"scores": torch.tensor(sample["scores"], dtype=torch.float)}
         return all_inputs, targets
 
     def estimate(
@@ -197,7 +201,18 @@ class RegressionMetricMultiReference(CometModel):
         src_sentemb: torch.Tensor,
         mt_sentemb: torch.Tensor,
         ref_sentemb: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Prediction:
+        """Method that takes the sentence embeddings from the Encoder and runs the
+        Estimator Feed-Forward on top.
+
+        Args:
+            src_sentemb [torch.Tensor]: Source sentence embedding
+            mt_sentemb [torch.Tensor]: Translation sentence embedding
+            ref_sentemb [torch.Tensor]: Reference sentence embedding
+
+        Return:
+            Prediction object with sentence scores.
+        """
         diff_ref = torch.abs(mt_sentemb - ref_sentemb)
         diff_src = torch.abs(mt_sentemb - src_sentemb)
 
@@ -208,7 +223,7 @@ class RegressionMetricMultiReference(CometModel):
             (src_sentemb, mt_sentemb, ref_sentemb, prod_ref, diff_ref, prod_src, diff_src),
             dim=1,
         )
-        return {"score": self.estimator(embedded_sequences)}
+        return Prediction(scores=self.estimator(embedded_sequences).view(-1))
 
     def forward(
         self,
@@ -219,11 +234,62 @@ class RegressionMetricMultiReference(CometModel):
         ref_input_ids: torch.tensor,
         ref_attention_mask: torch.tensor,
         **kwargs
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Prediction:
+        """Regression model forward method.
+
+        Args:
+            src_input_ids [torch.tensor]: input ids from source sentences.
+            src_attention_mask [torch.tensor]: Attention mask from source sentences.
+            mt_input_ids [torch.tensor]: input ids from MT.
+            mt_attention_mask [torch.tensor]: Attention mask from MT.
+            ref_input_ids [torch.tensor]: input ids from reference translations.
+            ref_attention_mask [torch.tensor]: Attention mask from reference translations.
+
+        Return:
+            Prediction object with translation scores.
+        """
         src_sentemb = self.get_sentence_embedding(src_input_ids, src_attention_mask)
-        mt_sentemb = self.get_sentence_embedding(mt_input_ids, mt_attention_mask)
         ref_sentemb = self.get_sentence_embedding(ref_input_ids, ref_attention_mask)
+        mt_sentemb = self.get_sentence_embedding(mt_input_ids, mt_attention_mask)
         return self.estimate(src_sentemb, mt_sentemb, ref_sentemb)
+
+    def read_training_data(self, path: str) -> List[dict]:
+        """Method that reads the training data (a csv file) and returns a list of
+        samples.
+
+        Returns:
+            List[dict]: List with input samples in the form of a dict
+        """
+        raise NotImplementedError()
+        df = pd.read_csv(path)
+        df = df[["src", "mt", "ref", "score"]]
+        df["src"] = df["src"].astype(str)
+        df["mt"] = df["mt"].astype(str)
+        df["ref"] = df["ref"].astype(str)
+        df["scores"] = df["scores"].astype("float16")
+        return df.to_dict("records")
+
+    def read_validation_data(self, path: str) -> List[dict]:
+        """Method that reads the validation data (a csv file) and returns a list of
+        samples.
+
+        Returns:
+            List[dict]: List with input samples in the form of a dict
+        """
+        raise NotImplementedError()
+        df = pd.read_csv(path)
+        columns = ["src", "mt", "ref", "score"]
+        # If system in columns we will use this to calculate system-level accuracy
+        if "system" in df.columns:
+            columns.append("system")
+            df["system"] = df["system"].astype(str)
+
+        df = df[columns]
+        df["scores"] = df["scores"].astype("float16")
+        df["src"] = df["src"].astype(str)
+        df["mt"] = df["mt"].astype(str)
+        df["ref"] = df["ref"].astype(str)
+        return df.to_dict("records")
 
     def read_csv(self, path: str) -> List[dict]:
         """Reads a comma separated value file.
@@ -237,7 +303,7 @@ class RegressionMetricMultiReference(CometModel):
         df["src"] = df["src"].astype(str)
         df["mt"] = df["mt"].astype(str)
         df["ref"] = df["ref"].astype(str)
-        df["score"] = df["score"].astype("float16")
+        df["scores"] = df["scores"].astype("float16")
         return df.to_dict("records")
 
     def training_step(
@@ -311,12 +377,12 @@ class RegressionMetricMultiReference(CometModel):
         self.log("val_loss", loss_value, on_step=True, on_epoch=True)
 
         # TODO: REMOVE if condition after torchmetrics bug fix
-        if batch_prediction["score"].view(-1).size() != torch.Size([1]):
+        if batch_prediction["scores"].view(-1).size() != torch.Size([1]):
             if dataloader_idx == 0:
                 self.train_metrics.update(
-                    batch_prediction["score"].view(-1), batch_target["score"]
+                    batch_prediction["scores"].view(-1), batch_target["scores"]
                 )
             elif dataloader_idx == 1:
                 self.val_metrics.update(
-                    batch_prediction["score"].view(-1), batch_target["score"]
+                    batch_prediction["scores"].view(-1), batch_target["scores"]
                 )

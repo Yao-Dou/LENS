@@ -16,33 +16,43 @@
 r"""
 Metrics
 =======
-    Regression and Ranking metrics to be used during training to measure 
+    Regression and Ranking metrics to be used during training to measure
     correlations with human judgements
 """
-import torch
-from torch import Tensor
-
-from torchmetrics import Metric
 from typing import Any, Callable, List, Optional
 import scipy.stats as stats
+import torch
+from torchmetrics import MatthewsCorrCoef, Metric
+
+
+
+class MCCMetric(MatthewsCorrCoef):
+    def __init__(self, prefix: str = "", **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.prefix = prefix
+
+    def compute(self) -> torch.Tensor:
+        """Computes matthews correlation coefficient."""
+        mcc = super(MCCMetric, self).compute()
+        return {self.prefix + "_mcc": mcc}
 
 
 class RegressionMetrics(Metric):
     is_differentiable = False
     higher_is_better = True
-    preds: List[Tensor]
-    target: List[Tensor]
+    preds: List[torch.Tensor]
+    target: List[torch.Tensor]
 
     def __init__(
         self,
         prefix: str = "",
-        compute_on_step: bool = False,
+        # compute_on_step: bool = False,
         dist_sync_on_step: bool = False,
         process_group: Optional[Any] = None,
         dist_sync_fn: Optional[Callable] = None,
     ) -> None:
         super().__init__(
-            compute_on_step=compute_on_step,
+            # compute_on_step=compute_on_step,
             dist_sync_on_step=dist_sync_on_step,
             process_group=process_group,
             dist_sync_fn=dist_sync_fn,
@@ -51,18 +61,23 @@ class RegressionMetrics(Metric):
         self.add_state("target", default=[], dist_reduce_fx="cat")
         self.prefix = prefix
 
-        
-    def update(self, preds: Tensor, target: Tensor) -> None:  # type: ignore
+    def update(
+        self,
+        preds: torch.Tensor,
+        target: torch.Tensor,
+        systems: Optional[List[str]] = None,
+    ) -> None:  # type: ignore
         """Update state with predictions and targets.
+
         Args:
-            preds: Predictions from model
-            target: Ground truth values
+            preds (torch.Tensor): Predictions from model
+            target (torch.Tensor): Ground truth values
         """
         self.preds.append(preds)
         self.target.append(target)
 
-    def compute(self) -> Tensor:
-        """ Computes spearmans correlation coefficient. """
+    def compute(self) -> torch.Tensor:
+        """Computes spearmans correlation coefficient."""
         preds = torch.cat(self.preds, dim=0)
         target = torch.cat(self.target, dim=0)
         kendall, _ = stats.kendalltau(preds.tolist(), target.tolist())
@@ -71,20 +86,20 @@ class RegressionMetrics(Metric):
         return {
             self.prefix + "_kendall": kendall,
             self.prefix + "_spearman": spearman,
-            self.prefix + "_pearson": pearson,         
+            self.prefix + "_pearson": pearson,
         }
 
 class WMTKendall(Metric):
     def __init__(
         self,
         prefix: str = "",
-        compute_on_step: bool = False,
+        # compute_on_step: bool = False,
         dist_sync_on_step: bool = False,
         process_group: Optional[Any] = None,
         dist_sync_fn: Optional[Callable] = None,
     ) -> None:
         super().__init__(
-            compute_on_step=compute_on_step,
+            # compute_on_step=compute_on_step,
             dist_sync_on_step=dist_sync_on_step,
             process_group=process_group,
             dist_sync_fn=dist_sync_fn,

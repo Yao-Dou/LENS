@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import transformers
-from packaging import version
 
 from .bert import BERTEncoder
 from .roberta import RoBERTaEncoder
 
-
-str2encoder = {"BERT": BERTEncoder, "RoBERTa": RoBERTaEncoder}
+str2encoder = {
+    "BERT": BERTEncoder, 
+    "RoBERTa": RoBERTaEncoder
+}

@@ -20,8 +20,8 @@ RoBERTa Encoder
 from typing import Dict
 
 import torch
-from lens.encoders.base import Encoder
-from lens.encoders.bert import BERTEncoder
+from .base import Encoder
+from .bert import BERTEncoder
 from transformers import AutoModel, AutoTokenizer
 
 
@@ -31,7 +31,7 @@ class RoBERTaEncoder(BERTEncoder):
     :param pretrained_model: Pretrained model from hugging face.
     """
 
-    def __init__(self, pretrained_model: str) -> None:
+    def __init__(self, pretrained_model: str, load_pretrained_weights: bool = True) -> None:
         super(Encoder, self).__init__()
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model)
         self.model = AutoModel.from_pretrained(
@@ -40,7 +40,7 @@ class RoBERTaEncoder(BERTEncoder):
         self.model.encoder.output_hidden_states = True
 
     @classmethod
-    def from_pretrained(cls, pretrained_model: str) -> Encoder:
+    def from_pretrained(cls, pretrained_model: str, load_pretrained_weights: bool = True) -> Encoder:
         """Function that loads a pretrained encoder from Hugging Face.
         :param pretrained_model: Name of the pretrain model to be loaded.
 
