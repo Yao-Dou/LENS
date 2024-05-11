@@ -584,9 +584,13 @@ class LensModel(ptl.LightningModule, metaclass=abc.ABCMeta):
                 by the model.
         """
         # Don't use all GPUs if there are less samples than GPUs
-        if len(samples) < len(devices): 
-            devices = range(len(samples))
-        gpus = len(devices)
+        if devices and len(devices) > 0:
+          # Don't use all GPUs if there are less samples than GPUs
+          if len(samples) < len(devices): 
+              devices = range(len(samples))
+          gpus = len(devices)
+        else:
+          gpus = 0
         
         if mc_dropout > 0:
             self.set_mc_dropout(mc_dropout)
@@ -624,6 +628,9 @@ class LensModel(ptl.LightningModule, metaclass=abc.ABCMeta):
         else:
             callbacks = []
 
+        if gpus == 0: 
+          devices = 'auto'
+
         if progress_bar:
             enable_progress_bar = True
             callbacks.append(PredictProgressBar())
@@ -640,7 +647,7 @@ class LensModel(ptl.LightningModule, metaclass=abc.ABCMeta):
             logger=False,
             callbacks=callbacks,
             accelerator=accelerator if gpus > 0 else "cpu",
-            strategy="ddp",
+            strategy="auto",
             enable_progress_bar=enable_progress_bar,
         )
         return_predictions = False if gpus > 1 else True

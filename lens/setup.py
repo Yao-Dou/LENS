@@ -12,7 +12,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         "sentencepiece >= 0.1.96",
-        "pandas == 1.1.5",
+        "pandas >= 1.5.0, < 2.0.0",
         "transformers >= 4.8",
         "pytorch-lightning == 2.0.9",
         "jsonargparse == 3.13.1",

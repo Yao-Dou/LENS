@@ -158,6 +158,8 @@ class UnifiedMetric(LensModel):
             load_pretrained_weights=load_pretrained_weights
         )
 
+        initalize_pretrained_unified_weights = False
+
         if initalize_pretrained_unified_weights:
             # Load encoder & sentence estimation from another Unified Model
             print(f'Initializing encoder & estimator from {pretrained_unified_model}')
